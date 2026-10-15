@@ -95,12 +95,20 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+func redactLogPath(p string) string {
+	const prefix = "/api/v1/s/"
+	if strings.HasPrefix(p, prefix) && len(p) > len(prefix) {
+		return prefix + "[redacted]"
+	}
+	return p
+}
+
 func (s *Server) withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		attrs := []any{"method", r.Method, "path", r.URL.Path, "status", sw.status, "duration_ms", time.Since(start).Milliseconds()}
+		attrs := []any{"method", r.Method, "path", redactLogPath(r.URL.Path), "status", sw.status, "duration_ms", time.Since(start).Milliseconds()}
 		if sess, ok := r.Context().Value(sessionKey{}).(session.Session); ok {
 			attrs = append(attrs, "account_id", sess.AccountID.String())
 		}
