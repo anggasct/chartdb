@@ -146,7 +146,7 @@ func (s *Service) Put(ctx context.Context, owner uuid.UUID, id string, raw []byt
 	var current string
 	var head int
 	var createdAt time.Time
-	err = tx.QueryRowContext(ctx, `SELECT owner_account_id, title, document::text, head_version, created_at FROM diagram WHERE id = $1`, diagramID).Scan(&ownerID, &title, &current, &head, &createdAt)
+	err = tx.QueryRowContext(ctx, `SELECT owner_account_id, title, document::text, head_version, created_at FROM diagram WHERE id = $1 FOR UPDATE`, diagramID).Scan(&ownerID, &title, &current, &head, &createdAt)
 	if err == sql.ErrNoRows {
 		return Summary{}, apierror.NotFound("not_found", "diagram not found")
 	}
@@ -354,14 +354,14 @@ func (s *Service) Restore(ctx context.Context, owner uuid.UUID, id string, n int
 		return Summary{}, apierror.Internal()
 	}
 	defer tx.Rollback()
-	found, isOwner, err := owned(ctx, tx, owner, diagramID)
-	if err != nil {
+	var ownerID uuid.UUID
+	if err := tx.QueryRowContext(ctx, `SELECT owner_account_id FROM diagram WHERE id = $1 FOR UPDATE`, diagramID).Scan(&ownerID); err != nil {
+		if err == sql.ErrNoRows {
+			return Summary{}, apierror.NotFound("not_found", "diagram not found")
+		}
 		return Summary{}, apierror.Internal()
 	}
-	if !found {
-		return Summary{}, apierror.NotFound("not_found", "diagram not found")
-	}
-	if !isOwner {
+	if ownerID != owner {
 		return Summary{}, apierror.Forbidden("forbidden", "you do not own this diagram")
 	}
 	var doc string
@@ -371,14 +371,25 @@ func (s *Service) Restore(ctx context.Context, owner uuid.UUID, id string, n int
 		}
 		return Summary{}, apierror.Internal()
 	}
+	var maxVersion int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM diagram_version WHERE diagram_id = $1`, diagramID).Scan(&maxVersion); err != nil {
+		return Summary{}, apierror.Internal()
+	}
+	next := maxVersion + 1
+	if next < 1 {
+		next = 1
+	}
 	var out Summary
 	var title string
 	var createdAt time.Time
-	if err := tx.QueryRowContext(ctx, `UPDATE diagram SET document = $1::jsonb, head_version = $2, updated_at = now() WHERE id = $3 RETURNING id, title, head_version, created_at, updated_at`, doc, n, diagramID).Scan(&out.ID, &title, &out.Version, &createdAt, &out.UpdatedAt); err != nil {
+	if err := tx.QueryRowContext(ctx, `UPDATE diagram SET document = $1::jsonb, head_version = $2, updated_at = now() WHERE id = $3 RETURNING id, title, head_version, created_at, updated_at`, doc, next, diagramID).Scan(&out.ID, &title, &out.Version, &createdAt, &out.UpdatedAt); err != nil {
 		return Summary{}, apierror.Internal()
 	}
 	out.Title = title
 	out.CreatedAt = createdAt
+	if _, err := tx.ExecContext(ctx, `INSERT INTO diagram_version (id, diagram_id, version, document, created_by) VALUES ($1, $2, $3, $4::jsonb, $5)`, uuid.New(), diagramID, next, doc, owner.String()); err != nil {
+		return Summary{}, apierror.Internal()
+	}
 	if err := tx.Commit(); err != nil {
 		return Summary{}, apierror.Internal()
 	}

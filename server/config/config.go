@@ -27,20 +27,21 @@ type OIDCProvider struct {
 }
 
 type Config struct {
-	Addr            string
-	DatabaseURL     string
-	PublicURL       string
-	AppURL          string
-	StaticDir       string
-	CookieSecure    bool
-	SessionLifetime time.Duration
-	MaxDocBytes     int64
-	LoginPerMinute  int
-	RegisterPerHour int
-	ArgonMemory     uint32
-	ArgonTime       uint32
-	ArgonThreads    uint8
-	OIDC            *OIDCProvider
+	Addr              string
+	DatabaseURL       string
+	PublicURL         string
+	AppURL            string
+	StaticDir         string
+	CookieSecure      bool
+	TrustProxyHeaders bool
+	SessionLifetime   time.Duration
+	MaxDocBytes       int64
+	LoginPerMinute    int
+	RegisterPerHour   int
+	ArgonMemory       uint32
+	ArgonTime         uint32
+	ArgonThreads      uint8
+	OIDC              *OIDCProvider
 }
 
 func getenv(key, fallback string) string {
@@ -73,19 +74,20 @@ func Load() Config {
 	oidcIssuer := os.Getenv("CHARTDB_OIDC_ISSUER")
 
 	cfg := Config{
-		Addr:            getenv("CHARTDB_ADDR", DefaultAddr),
-		DatabaseURL:     os.Getenv("CHARTDB_DATABASE_URL"),
-		PublicURL:       publicURL,
-		AppURL:          getenv("CHARTDB_APP_URL", publicURL),
-		StaticDir:       os.Getenv("CHARTDB_STATIC_DIR"),
-		CookieSecure:    getenv("CHARTDB_COOKIE_SECURE", "1") != "0",
-		SessionLifetime: getduration("CHARTDB_SESSION_LIFETIME", DefaultSessionLifetime),
-		MaxDocBytes:     int64(getint("CHARTDB_MAX_DOC_BYTES", DefaultMaxDocBytes)),
-		LoginPerMinute:  getint("CHARTDB_LOGIN_RATE_PER_MIN", DefaultLoginPerMinute),
-		RegisterPerHour: getint("CHARTDB_REGISTER_RATE_PER_HOUR", DefaultRegisterPerHour),
-		ArgonMemory:     uint32(getint("CHARTDB_ARGON_MEMORY_KIB", DefaultArgonMemory)),
-		ArgonTime:       uint32(getint("CHARTDB_ARGON_TIME", DefaultArgonTime)),
-		ArgonThreads:    uint8(getint("CHARTDB_ARGON_THREADS", DefaultArgonThreads)),
+		Addr:              getenv("CHARTDB_ADDR", DefaultAddr),
+		DatabaseURL:       os.Getenv("CHARTDB_DATABASE_URL"),
+		PublicURL:         publicURL,
+		AppURL:            getenv("CHARTDB_APP_URL", publicURL),
+		StaticDir:         os.Getenv("CHARTDB_STATIC_DIR"),
+		CookieSecure:      getenv("CHARTDB_COOKIE_SECURE", "1") != "0",
+		TrustProxyHeaders: getenv("CHARTDB_TRUST_PROXY_HEADERS", "0") == "1",
+		SessionLifetime:   getduration("CHARTDB_SESSION_LIFETIME", DefaultSessionLifetime),
+		MaxDocBytes:       int64(getint("CHARTDB_MAX_DOC_BYTES", DefaultMaxDocBytes)),
+		LoginPerMinute:    getint("CHARTDB_LOGIN_RATE_PER_MIN", DefaultLoginPerMinute),
+		RegisterPerHour:   getint("CHARTDB_REGISTER_RATE_PER_HOUR", DefaultRegisterPerHour),
+		ArgonMemory:       uint32(getint("CHARTDB_ARGON_MEMORY_KIB", DefaultArgonMemory)),
+		ArgonTime:         uint32(getint("CHARTDB_ARGON_TIME", DefaultArgonTime)),
+		ArgonThreads:      uint8(getint("CHARTDB_ARGON_THREADS", DefaultArgonThreads)),
 	}
 
 	if oidcIssuer != "" {

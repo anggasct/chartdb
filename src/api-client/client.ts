@@ -95,11 +95,6 @@ export interface SharedDocument {
     version: number;
 }
 
-export interface OIDCProviderInfo {
-    id: string;
-    name: string;
-}
-
 export const api = {
     register: (email: string, password: string, displayName?: string) =>
         request<Account>('/api/v1/auth/register', {
@@ -118,10 +113,6 @@ export const api = {
     logout: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
     me: () =>
         request<{ account: Account; identities: Identity[] }>('/api/v1/me'),
-    oidcProviders: () =>
-        request<{ providers: OIDCProviderInfo[] }>(
-            '/api/v1/auth/oidc/providers'
-        ),
     listDiagrams: (limit = 50, cursor?: string) => {
         const params = new URLSearchParams({ limit: String(limit) });
         if (cursor) {

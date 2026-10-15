@@ -30,6 +30,7 @@ type stubIdP struct {
 	email    string
 	verified bool
 	sub      string
+	nonce    string
 }
 
 func (s *stubIdP) sign(payload map[string]any) string {
@@ -81,6 +82,7 @@ func (s *stubIdP) handler() http.Handler {
 			"iss": issuer, "sub": s.sub, "aud": "test-client",
 			"exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
 			"email": s.email, "email_verified": s.verified, "name": "IdP User",
+			"nonce": s.nonce,
 		})
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "stub-access", "token_type": "Bearer",
@@ -109,19 +111,29 @@ func TestOIDCRealProviderRoundtrip(t *testing.T) {
 	}
 	svc := auth.NewService(env.Store.DB, time.Hour, 8192, 1, 1, map[string]auth.Provider{"stub": provider})
 
-	authURL, err := svc.BeginLogin("stub")
+	parseAuthURL := func(authURL string) (string, string) {
+		query := strings.SplitN(authURL, "?", 2)[1]
+		state, nonce := "", ""
+		for _, part := range strings.Split(query, "&") {
+			if strings.HasPrefix(part, "state=") {
+				state = strings.TrimPrefix(part, "state=")
+			}
+			if strings.HasPrefix(part, "nonce=") {
+				nonce = strings.TrimPrefix(part, "nonce=")
+			}
+		}
+		if state == "" || nonce == "" {
+			t.Fatalf("auth url missing state or nonce: %s", authURL)
+		}
+		return state, nonce
+	}
+
+	authURL, err := svc.BeginLogin("stub", nil)
 	if err != nil {
 		t.Fatalf("begin login: %v", err)
 	}
-	state := ""
-	for _, part := range strings.Split(strings.SplitN(authURL, "?", 2)[1], "&") {
-		if strings.HasPrefix(part, "state=") {
-			state = strings.TrimPrefix(part, "state=")
-		}
-	}
-	if state == "" {
-		t.Fatalf("auth url missing state: %s", authURL)
-	}
+	state, nonce := parseAuthURL(authURL)
+	idp.nonce = nonce
 	first, _, err := svc.Callback(t.Context(), state, "stub-code", nil, "ua", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("callback: %v", err)
@@ -130,21 +142,27 @@ func TestOIDCRealProviderRoundtrip(t *testing.T) {
 		t.Fatalf("account email %v", first.PrimaryEmail)
 	}
 
-	authURL, err = svc.BeginLogin("stub")
+	authURL, err = svc.BeginLogin("stub", nil)
 	if err != nil {
 		t.Fatalf("begin login: %v", err)
 	}
-	state = ""
-	for _, part := range strings.Split(strings.SplitN(authURL, "?", 2)[1], "&") {
-		if strings.HasPrefix(part, "state=") {
-			state = strings.TrimPrefix(part, "state=")
-		}
-	}
+	state, nonce = parseAuthURL(authURL)
+	idp.nonce = nonce
 	second, _, err := svc.Callback(t.Context(), state, "stub-code", nil, "ua", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("repeat callback: %v", err)
 	}
 	if second.ID != first.ID {
 		t.Fatalf("repeat login created a second account")
+	}
+
+	authURL, err = svc.BeginLogin("stub", nil)
+	if err != nil {
+		t.Fatalf("begin login: %v", err)
+	}
+	state, _ = parseAuthURL(authURL)
+	idp.nonce = "tampered-nonce"
+	if _, _, err := svc.Callback(t.Context(), state, "stub-code", nil, "ua", "127.0.0.1"); err == nil {
+		t.Fatalf("callback with wrong nonce must fail")
 	}
 }

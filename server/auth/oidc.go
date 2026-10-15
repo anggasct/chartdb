@@ -23,16 +23,19 @@ type IdentityToken struct {
 	Email         string
 	EmailVerified bool
 	Name          string
+	Nonce         string
 }
 
 type Provider interface {
 	AuthCodeURL(state, nonce, verifier string) string
-	Exchange(ctx context.Context, code, verifier string) (IdentityToken, error)
+	Exchange(ctx context.Context, code, verifier, expectedNonce string) (IdentityToken, error)
 }
 
 type pendingLogin struct {
 	providerID string
 	verifier   string
+	nonce      string
+	accountID  *uuid.UUID
 	expiresAt  time.Time
 }
 
@@ -46,7 +49,7 @@ func newStateStore(ttl time.Duration) *stateStore {
 	return &stateStore{pending: map[string]pendingLogin{}, ttl: ttl}
 }
 
-func (s *stateStore) put(providerID, verifier string) (string, error) {
+func (s *stateStore) put(providerID, verifier, nonce string, accountID *uuid.UUID) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -54,7 +57,12 @@ func (s *stateStore) put(providerID, verifier string) (string, error) {
 	state := base64.RawURLEncoding.EncodeToString(raw)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pending[state] = pendingLogin{providerID: providerID, verifier: verifier, expiresAt: time.Now().Add(s.ttl)}
+	var bound *uuid.UUID
+	if accountID != nil {
+		copied := *accountID
+		bound = &copied
+	}
+	s.pending[state] = pendingLogin{providerID: providerID, verifier: verifier, nonce: nonce, accountID: bound, expiresAt: time.Now().Add(s.ttl)}
 	return state, nil
 }
 
@@ -95,7 +103,7 @@ func (p *goOIDCProvider) AuthCodeURL(state, nonce, verifier string) string {
 	return p.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oauth2.SetAuthURLParam("nonce", nonce))
 }
 
-func (p *goOIDCProvider) Exchange(ctx context.Context, code, verifier string) (IdentityToken, error) {
+func (p *goOIDCProvider) Exchange(ctx context.Context, code, verifier, expectedNonce string) (IdentityToken, error) {
 	token, err := p.oauth.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
 		return IdentityToken{}, err
@@ -113,18 +121,22 @@ func (p *goOIDCProvider) Exchange(ctx context.Context, code, verifier string) (I
 		Email         string `json:"email"`
 		EmailVerified *bool  `json:"email_verified"`
 		Name          string `json:"name"`
+		Nonce         string `json:"nonce"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		return IdentityToken{}, apierror.BadRequest("oidc_failed", "could not read provider identity")
+	}
+	if expectedNonce == "" || claims.Nonce != expectedNonce {
+		return IdentityToken{}, apierror.BadRequest("oidc_failed", "provider login failed")
 	}
 	verified := false
 	if claims.EmailVerified != nil {
 		verified = *claims.EmailVerified
 	}
-	return IdentityToken{Subject: idToken.Subject, Email: strings.ToLower(strings.TrimSpace(claims.Email)), EmailVerified: verified, Name: claims.Name}, nil
+	return IdentityToken{Subject: idToken.Subject, Email: strings.ToLower(strings.TrimSpace(claims.Email)), EmailVerified: verified, Name: claims.Name, Nonce: claims.Nonce}, nil
 }
 
-func (s *Service) BeginLogin(providerID string) (string, error) {
+func (s *Service) BeginLogin(providerID string, current *uuid.UUID) (string, error) {
 	provider, ok := s.Providers[providerID]
 	if !ok {
 		return "", apierror.NotFound("provider_unknown", "unknown login provider")
@@ -134,11 +146,19 @@ func (s *Service) BeginLogin(providerID string) (string, error) {
 	if _, err := rand.Read(nonceRaw); err != nil {
 		return "", apierror.Internal()
 	}
-	state, err := s.states.put(providerID, verifier)
+	nonce := base64.RawURLEncoding.EncodeToString(nonceRaw)
+	state, err := s.states.put(providerID, verifier, nonce, current)
 	if err != nil {
 		return "", apierror.Internal()
 	}
-	return provider.AuthCodeURL(state, base64.RawURLEncoding.EncodeToString(nonceRaw), verifier), nil
+	return provider.AuthCodeURL(state, nonce, verifier), nil
+}
+
+func boundAccountMatches(pending *uuid.UUID, current *uuid.UUID) bool {
+	if pending == nil || current == nil {
+		return pending == nil && current == nil
+	}
+	return *pending == *current
 }
 
 func (s *Service) Callback(ctx context.Context, state, code string, current *uuid.UUID, userAgent, ip string) (Account, string, error) {
@@ -146,15 +166,21 @@ func (s *Service) Callback(ctx context.Context, state, code string, current *uui
 	if !ok {
 		return Account{}, "", apierror.BadRequest("invalid_state", "login session expired, try again")
 	}
+	if !boundAccountMatches(pending.accountID, current) {
+		return Account{}, "", apierror.BadRequest("invalid_state", "login session expired, try again")
+	}
 	provider, ok := s.Providers[pending.providerID]
 	if !ok {
 		return Account{}, "", apierror.BadRequest("provider_unknown", "unknown login provider")
 	}
-	claims, err := provider.Exchange(ctx, code, pending.verifier)
+	claims, err := provider.Exchange(ctx, code, pending.verifier, pending.nonce)
 	if err != nil {
 		if apiErr, ok := err.(*apierror.Error); ok {
 			return Account{}, "", apiErr
 		}
+		return Account{}, "", apierror.BadRequest("oidc_failed", "provider login failed")
+	}
+	if pending.nonce == "" || claims.Nonce != pending.nonce {
 		return Account{}, "", apierror.BadRequest("oidc_failed", "provider login failed")
 	}
 	if claims.Subject == "" {

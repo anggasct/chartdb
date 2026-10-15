@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/anggasct/chartdb/server/testhelper"
@@ -116,6 +117,9 @@ func TestDiagramVersions(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("restore status %d body %v", status, body)
 	}
+	if body["version"] != float64(3) {
+		t.Fatalf("restore must append version 3, got %v", body)
+	}
 	status, body = testhelper.Do(t, client, "GET", env.Server.URL+"/api/v1/diagram/"+id, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get after restore status %d", status)
@@ -129,20 +133,31 @@ func TestDiagramVersions(t *testing.T) {
 	if string(got) != string(want) {
 		t.Fatalf("HEAD after restore must equal version 1 bytes: %s vs %s", got, want)
 	}
-	if n := versionCount(t, env, id); n != 2 {
-		t.Fatalf("restore must leave history untouched, rows %d", n)
+	if n := versionCount(t, env, id); n != 3 {
+		t.Fatalf("restore must append history, rows %d", n)
 	}
+	assertInvariant(t, env, id)
+
+	v3 := `{"tables":[{"name":"users"}],"meta":{"v":3}}`
+	status, body = putRaw(t, env, client, id, v3)
+	if status != http.StatusOK {
+		t.Fatalf("post-restore put status %d body %v", status, body)
+	}
+	if body["version"] != float64(4) {
+		t.Fatalf("post-restore save must be version 4, got %v", body)
+	}
+	assertInvariant(t, env, id)
 
 	status, body = testhelper.Do(t, client, "GET", env.Server.URL+"/api/v1/diagram/"+id+"/version", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list versions status %d", status)
 	}
 	versions, _ := body["versions"].([]any)
-	if len(versions) != 2 {
-		t.Fatalf("expected 2 versions newest-first, got %v", body)
+	if len(versions) != 4 {
+		t.Fatalf("expected 4 versions newest-first, got %v", body)
 	}
 	first, _ := versions[0].(map[string]any)
-	if first["version"] != float64(2) {
+	if first["version"] != float64(4) {
 		t.Fatalf("versions must be newest-first: %v", body)
 	}
 
@@ -191,4 +206,48 @@ func TestDiagramListAndDelete(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("get after delete status %d, want 404", status)
 	}
+}
+
+func TestConcurrentSavesAllocateDistinctVersions(t *testing.T) {
+	env := testhelper.Boot(t, nil)
+	client := env.Client()
+	env.Register(t, client, testhelper.UniqueEmail("concurrent"), "password-123")
+
+	id := createDiagram(t, env, client, "Racy", `{"n":0}`)
+	docs := []string{`{"n":1}`, `{"n":2}`}
+	type result struct {
+		status  int
+		version float64
+	}
+	out := make([]result, len(docs))
+	var wg sync.WaitGroup
+	for i, doc := range docs {
+		wg.Add(1)
+		go func(i int, doc string) {
+			defer wg.Done()
+			status, body := putRaw(t, env, client, id, doc)
+			v, _ := body["version"].(float64)
+			out[i] = result{status: status, version: v}
+		}(i, doc)
+	}
+	wg.Wait()
+	for i, r := range out {
+		if r.status != http.StatusOK {
+			t.Fatalf("concurrent save %d status %d, want 200", i, r.status)
+		}
+	}
+	if out[0].version == out[1].version {
+		t.Fatalf("concurrent saves must yield distinct versions, got %v", out)
+	}
+	lo, hi := out[0].version, out[1].version
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	if lo != 2 || hi != 3 {
+		t.Fatalf("concurrent saves must yield versions 2 and 3, got %v", out)
+	}
+	if n := versionCount(t, env, id); n != 3 {
+		t.Fatalf("expected 3 version rows after concurrent saves, got %d", n)
+	}
+	assertInvariant(t, env, id)
 }

@@ -55,10 +55,15 @@ func (s *Server) AddProvider(id string, p auth.Provider) {
 	s.authSvc.Providers[id] = p
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
-			return strings.TrimSpace(first)
+func clientIPFrom(r *http.Request, trustProxyHeaders bool) string {
+	if trustProxyHeaders {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
+				return strings.TrimSpace(first)
+			}
+		}
+		if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
+			return real
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -66,6 +71,10 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	return clientIPFrom(r, s.cfg.TrustProxyHeaders)
 }
 
 func userAgent(r *http.Request) string {
@@ -100,6 +109,18 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 }
 
 type sessionKey struct{}
+
+func (s *Server) optionalAccount(r *http.Request) *uuid.UUID {
+	cookie, err := r.Cookie(session.CookieName)
+	if err != nil {
+		return nil
+	}
+	sess, err := session.Validate(r.Context(), s.store.DB, cookie.Value)
+	if err != nil {
+		return nil
+	}
+	return &sess.AccountID
+}
 
 func (s *Server) withAuth(next func(http.ResponseWriter, *http.Request, session.Session)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +169,6 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
-	mux.HandleFunc("GET /api/v1/auth/oidc/providers", s.handleOIDCProviders)
 	mux.HandleFunc("GET /api/v1/auth/login/oidc", s.handleOIDCBegin)
 	mux.HandleFunc("GET /api/v1/auth/callback", s.handleOIDCCallback)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
@@ -174,7 +194,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if !s.registerLimiter.Allow(clientIP(r)) {
+	if !s.registerLimiter.Allow(s.clientIP(r)) {
 		w.Header().Set("Retry-After", "3600")
 		apierror.Write(w, r, apierror.TooManyRequests())
 		return
@@ -187,7 +207,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	acc, token, err := s.authSvc.Register(r.Context(), body.Email, body.Password, body.DisplayName, userAgent(r), clientIP(r))
+	acc, token, err := s.authSvc.Register(r.Context(), body.Email, body.Password, body.DisplayName, userAgent(r), s.clientIP(r))
 	if err != nil {
 		if apiErr, ok := err.(*apierror.Error); ok && apiErr.Status == 409 {
 			slog.Warn("register conflict", "email", body.Email)
@@ -202,10 +222,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.Allow(clientIP(r)) {
+	if !s.loginLimiter.Allow(s.clientIP(r)) {
 		w.Header().Set("Retry-After", "60")
 		apierror.Write(w, r, apierror.TooManyRequests())
-		slog.Warn("login rate limited", "ip", clientIP(r))
+		slog.Warn("login rate limited", "ip", s.clientIP(r))
 		return
 	}
 	var body struct {
@@ -215,7 +235,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	acc, token, err := s.authSvc.Login(r.Context(), body.Email, body.Password, userAgent(r), clientIP(r))
+	acc, token, err := s.authSvc.Login(r.Context(), body.Email, body.Password, userAgent(r), s.clientIP(r))
 	if err != nil {
 		slog.Warn("login failed")
 		apierror.Write(w, r, err)
@@ -225,29 +245,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, acc)
 }
 
-func (s *Server) handleOIDCProviders(w http.ResponseWriter, r *http.Request) {
-	type provider struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	out := []provider{}
-	for id := range s.authSvc.Providers {
-		name := id
-		if s.cfg.OIDC != nil && s.cfg.OIDC.ID == id {
-			name = s.cfg.OIDC.DisplayName
-		}
-		out = append(out, provider{ID: id, Name: name})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"providers": out})
-}
-
 func (s *Server) handleOIDCBegin(w http.ResponseWriter, r *http.Request) {
 	providerID := r.URL.Query().Get("provider")
 	if providerID == "" {
 		apierror.Write(w, r, apierror.BadRequest("provider_required", "choose a login provider"))
 		return
 	}
-	url, err := s.authSvc.BeginLogin(providerID)
+	url, err := s.authSvc.BeginLogin(providerID, s.optionalAccount(r))
 	if err != nil {
 		apierror.Write(w, r, err)
 		return
@@ -256,7 +260,7 @@ func (s *Server) handleOIDCBegin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.Allow(clientIP(r)) {
+	if !s.loginLimiter.Allow(s.clientIP(r)) {
 		w.Header().Set("Retry-After", "60")
 		apierror.Write(w, r, apierror.TooManyRequests())
 		return
@@ -272,7 +276,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			current = &sess.AccountID
 		}
 	}
-	acc, token, err := s.authSvc.Callback(r.Context(), query.Get("state"), query.Get("code"), current, userAgent(r), clientIP(r))
+	acc, token, err := s.authSvc.Callback(r.Context(), query.Get("state"), query.Get("code"), current, userAgent(r), s.clientIP(r))
 	if err != nil {
 		slog.Warn("oidc callback failed")
 		apierror.Write(w, r, err)

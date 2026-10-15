@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/button/button';
-import { api, ApiClientError } from '@/api-client/client';
-import type { OIDCProviderInfo } from '@/api-client/client';
+import { ApiClientError } from '@/api-client/client';
 import { useAuth } from '@/hooks/use-auth';
 
 export const LoginPage: React.FC = () => {
@@ -12,19 +11,8 @@ export const LoginPage: React.FC = () => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [displayName, setDisplayName] = useState('');
-    const [providers, setProviders] = useState<OIDCProviderInfo[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
-
-    useEffect(() => {
-        api.oidcProviders()
-            .then((result) => {
-                setProviders(result.providers);
-            })
-            .catch(() => {
-                setProviders([]);
-            });
-    }, []);
 
     useEffect(() => {
         if (!loading && account) {
@@ -133,27 +121,6 @@ export const LoginPage: React.FC = () => {
                         </>
                     )}
                 </p>
-                {providers.length > 0 ? (
-                    <div className="mt-6 border-t border-solid border-slate-200 pt-4">
-                        <p className="mb-2 text-center text-sm text-slate-500">
-                            Or continue with
-                        </p>
-                        <div className="space-y-2">
-                            {providers.map((provider) => (
-                                <Button
-                                    key={provider.id}
-                                    variant="outline"
-                                    className="w-full"
-                                    onClick={() => {
-                                        window.location.href = `/api/v1/auth/login/oidc?provider=${encodeURIComponent(provider.id)}`;
-                                    }}
-                                >
-                                    {provider.name}
-                                </Button>
-                            ))}
-                        </div>
-                    </div>
-                ) : null}
             </div>
         </section>
     );

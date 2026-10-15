@@ -26,9 +26,6 @@ const unauthenticated = () => {
         if (url === '/api/v1/me') {
             return json({ error: { code: 'unauthorized', message: 'x' } }, 401);
         }
-        if (url === '/api/v1/auth/oidc/providers') {
-            return json({ providers: [] });
-        }
         return new Response('null', { status: 500 });
     };
 };
@@ -51,33 +48,6 @@ describe('LoginPage', () => {
         expect(screen.getByRole('button', { name: 'Log in' })).toBeTruthy();
     });
 
-    it('shows OIDC buttons provided by the server', async () => {
-        handler = (url: string) => {
-            if (url === '/api/v1/me') {
-                return json(
-                    { error: { code: 'unauthorized', message: 'x' } },
-                    401
-                );
-            }
-            if (url === '/api/v1/auth/oidc/providers') {
-                return json({
-                    providers: [{ id: 'sso', name: 'Company SSO' }],
-                });
-            }
-            return new Response('null', { status: 500 });
-        };
-        render(
-            <MemoryRouter initialEntries={['/login']}>
-                <AuthProvider>
-                    <LoginPage />
-                </AuthProvider>
-            </MemoryRouter>
-        );
-        expect(
-            await screen.findByRole('button', { name: 'Company SSO' })
-        ).toBeTruthy();
-    });
-
     it('logs in and lands on /diagrams', async () => {
         let loggedIn = false;
         const me = {
@@ -89,9 +59,6 @@ describe('LoginPage', () => {
             identities: [],
         };
         handler = (url: string) => {
-            if (url === '/api/v1/auth/oidc/providers') {
-                return json({ providers: [] });
-            }
             if (url === '/api/v1/me') {
                 return loggedIn
                     ? json(me)

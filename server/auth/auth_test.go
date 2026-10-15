@@ -15,15 +15,22 @@ import (
 )
 
 type stubProvider struct {
-	token auth.IdentityToken
+	token    auth.IdentityToken
+	badNonce bool
 }
 
 func (s stubProvider) AuthCodeURL(state, nonce, verifier string) string {
 	return "https://idp.example.test/authorize?state=" + state
 }
 
-func (s stubProvider) Exchange(ctx context.Context, code, verifier string) (auth.IdentityToken, error) {
-	return s.token, nil
+func (s stubProvider) Exchange(ctx context.Context, code, verifier, expectedNonce string) (auth.IdentityToken, error) {
+	tok := s.token
+	if s.badNonce {
+		tok.Nonce = "wrong-nonce"
+	} else {
+		tok.Nonce = expectedNonce
+	}
+	return tok, nil
 }
 
 func noRedirect(client *http.Client) *http.Client {
@@ -230,5 +237,43 @@ func TestOIDCLinkWhileLoggedIn(t *testing.T) {
 	identities, _ := body["identities"].([]any)
 	if len(identities) != 2 {
 		t.Fatalf("linked account must hold 2 identities, got %v", body)
+	}
+}
+
+func TestOIDCCrossSessionLinkRejected(t *testing.T) {
+	env := testhelper.Boot(t, nil)
+	env.API.AddProvider("stub", stubProvider{token: auth.IdentityToken{Subject: "attacker-" + uuid.NewString()[:8], Email: "attacker-idp@example.test", EmailVerified: true}})
+
+	victim := env.Client()
+	victimID := env.Register(t, victim, testhelper.UniqueEmail("victim"), "password-123")
+
+	attacker := noRedirect(env.Client())
+	state := oidcState(t, env, attacker, "stub")
+	if got := oidcCallback(t, env, noRedirect(victim), state); got != http.StatusBadRequest {
+		t.Fatalf("cross-session callback status %d, want 400", got)
+	}
+	if id := meID(t, env, victim); id != victimID {
+		t.Fatalf("victim session switched accounts: %s vs %s", id, victimID)
+	}
+	status, body := testhelper.Do(t, victim, "GET", env.Server.URL+"/api/v1/me", nil)
+	if status != http.StatusOK {
+		t.Fatalf("me status %d", status)
+	}
+	identities, _ := body["identities"].([]any)
+	if len(identities) != 1 {
+		t.Fatalf("cross-session attempt must not link a new identity, got %v", body)
+	}
+}
+
+func TestOIDCWrongNonceRejected(t *testing.T) {
+	env := testhelper.Boot(t, nil)
+	env.API.AddProvider("stub-bad-nonce", stubProvider{
+		token:    auth.IdentityToken{Subject: "nonce-" + uuid.NewString()[:8], Email: "nonce-idp@example.test", EmailVerified: true},
+		badNonce: true,
+	})
+
+	anon := noRedirect(env.Client())
+	if got := oidcCallback(t, env, anon, oidcState(t, env, anon, "stub-bad-nonce")); got != http.StatusBadRequest {
+		t.Fatalf("wrong-nonce callback status %d, want 400", got)
 	}
 }

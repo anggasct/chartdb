@@ -1,6 +1,9 @@
 package api_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -99,6 +102,65 @@ func TestLoginRateLimited(t *testing.T) {
 	status, body := testhelper.Do(t, client, "POST", env.Server.URL+"/api/v1/auth/login", payload)
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("rate burst: status %d body %v, want 429", status, body)
+	}
+}
+
+func doLoginWithXFF(t *testing.T, client *http.Client, url string, payload map[string]string, xff string) int {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode
+}
+
+func TestLoginRateLimitIgnoresSpoofedXFF(t *testing.T) {
+	env := testhelper.Boot(t, func(cfg *config.Config) {
+		cfg.LoginPerMinute = 2
+	})
+	client := env.Client()
+	payload := map[string]string{"email": testhelper.UniqueEmail("spoof"), "password": "nope-1234"}
+	url := env.Server.URL + "/api/v1/auth/login"
+	for i, xff := range []string{"10.0.0.1", "10.0.0.2"} {
+		if status := doLoginWithXFF(t, client, url, payload, xff); status != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status %d, want 401", i, status)
+		}
+	}
+	if status := doLoginWithXFF(t, client, url, payload, "10.0.0.3"); status != http.StatusTooManyRequests {
+		t.Fatalf("rotated XFF burst: status %d, want 429", status)
+	}
+}
+
+func TestLoginRateLimitTrustedProxyBucketsByForwardedIP(t *testing.T) {
+	env := testhelper.Boot(t, func(cfg *config.Config) {
+		cfg.LoginPerMinute = 1
+		cfg.TrustProxyHeaders = true
+	})
+	client := env.Client()
+	payload := map[string]string{"email": testhelper.UniqueEmail("trusted"), "password": "nope-1234"}
+	url := env.Server.URL + "/api/v1/auth/login"
+	if status := doLoginWithXFF(t, client, url, payload, "10.0.0.11"); status != http.StatusUnauthorized {
+		t.Fatalf("first source: status %d, want 401", status)
+	}
+	if status := doLoginWithXFF(t, client, url, payload, "10.0.0.12"); status != http.StatusUnauthorized {
+		t.Fatalf("second source must be bucketed independently: status %d, want 401", status)
+	}
+	if status := doLoginWithXFF(t, client, url, payload, "10.0.0.11"); status != http.StatusTooManyRequests {
+		t.Fatalf("repeat from first source: status %d, want 429", status)
 	}
 }
 
