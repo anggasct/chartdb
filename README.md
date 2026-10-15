@@ -8,6 +8,14 @@
   <br>
 </h1>
 
+> **Fork notice:** this is a self-hosted fork of
+> [chartdb/chartdb](https://github.com/chartdb/chartdb) that adds local +
+> SSO login, server-saved diagrams with version history, read-only share
+> links, and realtime co-editing via a Go backend (`server/`) and Postgres.
+> The editor canvas stays upstream code; fork-only UI lives in
+> `src/auth/`, `src/api-client/`, `src/share/`, and `src/versions/`.
+> Licensed AGPL-3.0, same as upstream.
+
 <p align="center">
   <b>Open-source database diagrams editor</b> <br />
   <b>No installations • No Database password required.</b> <br />
