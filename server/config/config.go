@@ -7,14 +7,18 @@ import (
 )
 
 const (
-	DefaultAddr            = ":8080"
-	DefaultSessionLifetime = 30 * 24 * time.Hour
-	DefaultMaxDocBytes     = 32 << 20
-	DefaultLoginPerMinute  = 10
-	DefaultRegisterPerHour = 5
-	DefaultArgonMemory     = 64 * 1024
-	DefaultArgonTime       = 3
-	DefaultArgonThreads    = 2
+	DefaultAddr              = ":8080"
+	DefaultSessionLifetime   = 30 * 24 * time.Hour
+	DefaultMaxDocBytes       = 32 << 20
+	DefaultLoginPerMinute    = 10
+	DefaultRegisterPerHour   = 5
+	DefaultArgonMemory       = 64 * 1024
+	DefaultArgonTime         = 3
+	DefaultArgonThreads      = 2
+	DefaultMaxWSMsgBytes     = 1 << 20
+	DefaultMaxConnPerDiagram = 50
+	DefaultSnapshotEveryN    = 500
+	DefaultAwarenessTimeout  = 30 * time.Second
 )
 
 type OIDCProvider struct {
@@ -41,6 +45,10 @@ type Config struct {
 	ArgonMemory       uint32
 	ArgonTime         uint32
 	ArgonThreads      uint8
+	MaxWSMsgBytes     int64
+	MaxConnPerDiagram int
+	SnapshotEveryN    int
+	AwarenessTimeout  time.Duration
 	OIDC              *OIDCProvider
 }
 
@@ -88,6 +96,10 @@ func Load() Config {
 		ArgonMemory:       uint32(getint("CHARTDB_ARGON_MEMORY_KIB", DefaultArgonMemory)),
 		ArgonTime:         uint32(getint("CHARTDB_ARGON_TIME", DefaultArgonTime)),
 		ArgonThreads:      uint8(getint("CHARTDB_ARGON_THREADS", DefaultArgonThreads)),
+		MaxWSMsgBytes:     int64(getint("CHARTDB_MAX_WS_MSG_BYTES", DefaultMaxWSMsgBytes)),
+		MaxConnPerDiagram: getint("CHARTDB_MAX_CONN_PER_DIAGRAM", DefaultMaxConnPerDiagram),
+		SnapshotEveryN:    getint("CHARTDB_SNAPSHOT_EVERY_N_UPDATES", DefaultSnapshotEveryN),
+		AwarenessTimeout:  getduration("CHARTDB_AWARENESS_TIMEOUT", DefaultAwarenessTimeout),
 	}
 
 	if oidcIssuer != "" {

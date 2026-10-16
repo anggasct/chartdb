@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"github.com/anggasct/chartdb/server/session"
 	"github.com/anggasct/chartdb/server/share"
 	"github.com/anggasct/chartdb/server/store"
+	"github.com/anggasct/chartdb/server/sync"
 )
 
 type Server struct {
@@ -31,6 +33,7 @@ type Server struct {
 	authSvc         *auth.Service
 	diagramSvc      *diagram.Service
 	shareSvc        *share.Service
+	syncHub         *sync.Hub
 	loginLimiter    *ratelimit.Limiter
 	registerLimiter *ratelimit.Limiter
 }
@@ -44,6 +47,7 @@ func New(cfg config.Config, st *store.Store) *Server {
 		store:           st,
 		diagramSvc:      diagram.NewService(st.DB, cfg.MaxDocBytes),
 		shareSvc:        share.NewService(st.DB),
+		syncHub:         sync.NewHub(st.DB, cfg.MaxWSMsgBytes, cfg.MaxConnPerDiagram, cfg.SnapshotEveryN, cfg.AwarenessTimeout),
 		loginLimiter:    ratelimit.New(cfg.LoginPerMinute, time.Minute),
 		registerLimiter: ratelimit.New(cfg.RegisterPerHour, time.Hour),
 	}
@@ -53,6 +57,10 @@ func New(cfg config.Config, st *store.Store) *Server {
 
 func (s *Server) AddProvider(id string, p auth.Provider) {
 	s.authSvc.Providers[id] = p
+}
+
+func (s *Server) SyncHub() *sync.Hub {
+	return s.syncHub
 }
 
 func clientIPFrom(r *http.Request, trustProxyHeaders bool) string {
@@ -93,6 +101,20 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return h.Hijack()
+}
+
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func redactLogPath(p string) string {
@@ -197,6 +219,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/diagram/{id}/share", s.withAuth(s.handleShareList))
 	mux.HandleFunc("DELETE /api/v1/diagram/{id}/share/{shareId}", s.withAuth(s.handleShareRevoke))
 	mux.HandleFunc("GET /api/v1/s/{token}", s.handleShareRead)
+	mux.HandleFunc("GET /api/v1/diagram/{id}/sync", s.handleSync)
 
 	return s.withLogging(mux)
 }
@@ -375,6 +398,7 @@ type saveResponse struct {
 	ID        uuid.UUID `json:"id"`
 	Title     string    `json:"title,omitempty"`
 	Version   int       `json:"version"`
+	Epoch     int       `json:"epoch"`
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -401,7 +425,7 @@ func (s *Server) handleDiagramCreate(w http.ResponseWriter, r *http.Request, ses
 		apierror.Write(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, saveResponse{ID: summary.ID, Title: summary.Title, Version: summary.Version, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt})
+	writeJSON(w, http.StatusCreated, saveResponse{ID: summary.ID, Title: summary.Title, Version: summary.Version, Epoch: summary.Epoch, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt})
 }
 
 func (s *Server) handleDiagramList(w http.ResponseWriter, r *http.Request, sess session.Session) {
@@ -437,12 +461,43 @@ func (s *Server) handleDiagramPut(w http.ResponseWriter, r *http.Request, sess s
 	if !ok {
 		return
 	}
-	summary, err := s.diagramSvc.Put(r.Context(), sess.AccountID, r.PathValue("id"), raw)
+	force := r.URL.Query().Has("force")
+	if !force {
+		if s.syncHub.PeerCount(r.PathValue("id")) > 0 {
+			apierror.Write(w, r, apierror.Conflict("editors_connected", "editors are connected, confirm replace"))
+			return
+		}
+	}
+	summary, err := s.diagramSvc.PutWithForce(r.Context(), sess.AccountID, r.PathValue("id"), raw, force)
 	if err != nil {
 		apierror.Write(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, saveResponse{ID: summary.ID, Version: summary.Version, UpdatedAt: summary.UpdatedAt})
+	if force {
+		diagramID, err := uuid.Parse(r.PathValue("id"))
+		if err == nil {
+			base := sync.BaseUpdateFromJSON(canonicalForSync(raw))
+			_ = s.resetRoom(diagramID, summary.Epoch, base)
+		}
+	}
+	writeJSON(w, http.StatusOK, saveResponse{ID: summary.ID, Version: summary.Version, Epoch: summary.Epoch, UpdatedAt: summary.UpdatedAt})
+}
+
+func (s *Server) resetRoom(diagramID uuid.UUID, epoch int, base []byte) error {
+	ctx := context.Background()
+	room, err := s.syncHub.GetOrLoad(ctx, diagramID)
+	if err != nil {
+		return err
+	}
+	freshState := base
+	if len(freshState) == 0 {
+		freshState = sync.BaseUpdateFromJSON([]byte(`{}`))
+	}
+	var maxSeq int64
+	_ = s.store.DB.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM sync_update WHERE diagram_id = $1`, diagramID).Scan(&maxSeq)
+	_, _ = s.store.DB.ExecContext(ctx, `INSERT INTO sync_snapshot (diagram_id, update, at_seq) VALUES ($1, $2, $3) ON CONFLICT (diagram_id) DO UPDATE SET update = EXCLUDED.update, at_seq = EXCLUDED.at_seq, created_at = now()`, diagramID, freshState, maxSeq)
+	room.ResetForForce(freshState, epoch, maxSeq)
+	return nil
 }
 
 func (s *Server) handleDiagramDelete(w http.ResponseWriter, r *http.Request, sess session.Session) {
@@ -488,7 +543,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, sess sess
 		apierror.Write(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, saveResponse{ID: summary.ID, Version: summary.Version, UpdatedAt: summary.UpdatedAt})
+	writeJSON(w, http.StatusOK, saveResponse{ID: summary.ID, Version: summary.Version, Epoch: summary.Epoch, UpdatedAt: summary.UpdatedAt})
 }
 
 func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request, sess session.Session) {
@@ -552,4 +607,45 @@ func (s *Server) handleShareRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, doc)
+}
+
+func canonicalForSync(raw []byte) []byte {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return raw
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(session.CookieName)
+	if err != nil {
+		apierror.Write(w, r, apierror.Unauthorized("unauthorized", "login required"))
+		return
+	}
+	sess, err := session.Validate(r.Context(), s.store.DB, cookie.Value)
+	if err != nil {
+		apierror.Write(w, r, apierror.Unauthorized("unauthorized", "login required"))
+		return
+	}
+	diagramID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		apierror.Write(w, r, apierror.BadRequest("invalid_id", "diagram id is not a valid UUID"))
+		return
+	}
+	var ownerID uuid.UUID
+	err = s.store.DB.QueryRowContext(r.Context(), `SELECT owner_account_id FROM diagram WHERE id = $1`, diagramID).Scan(&ownerID)
+	if err != nil {
+		apierror.Write(w, r, apierror.NotFound("not_found", "diagram not found"))
+		return
+	}
+	if ownerID != sess.AccountID {
+		apierror.Write(w, r, apierror.Forbidden("forbidden", "you do not own this diagram"))
+		return
+	}
+	s.syncHub.ServeWS(w, r, diagramID, sess.AccountID)
 }
