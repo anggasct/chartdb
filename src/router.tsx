@@ -6,6 +6,38 @@ import type { TemplatesPageLoaderData } from './pages/templates-page/templates-p
 import { getTemplatesAndAllTags } from './templates-data/template-utils';
 
 const routes: RouteObject[] = [
+    {
+        path: 'login',
+        async lazy() {
+            const { LoginPage } = await import('./pages/login-page/login-page');
+
+            return {
+                element: <LoginPage />,
+            };
+        },
+    },
+    {
+        path: 'diagrams',
+        async lazy() {
+            const { DiagramsPage } =
+                await import('./pages/diagrams-page/diagrams-page');
+
+            return {
+                element: <DiagramsPage />,
+            };
+        },
+    },
+    {
+        path: 's/:token',
+        async lazy() {
+            const { SharedViewPage } =
+                await import('./pages/shared-view-page/shared-view-page');
+
+            return {
+                element: <SharedViewPage />,
+            };
+        },
+    },
     ...['', 'diagrams/:diagramId'].map((path) => ({
         path,
         async lazy() {
@@ -142,3 +174,5 @@ const routes: RouteObject[] = [
 ];
 
 export const router = createBrowserRouter(routes);
+
+export { routes };
