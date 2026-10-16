@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "v": 2
+  },
+  "tables": [
+    {
+      "name": "orders"
+    }
+  ]
+}

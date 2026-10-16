@@ -63,6 +63,7 @@ export interface DiagramSummary {
     id: string;
     title: string;
     head_version: number;
+    epoch: number;
     created_at: string;
     updated_at: string;
 }
@@ -151,4 +152,14 @@ export const api = {
         }),
     readShared: (token: string) =>
         request<SharedDocument>(`/api/v1/s/${encodeURIComponent(token)}`),
+    updateDiagram: (id: string, document: unknown, force = false) =>
+        request<{
+            id: string;
+            version: number;
+            epoch: number;
+            updated_at: string;
+        }>(`/api/v1/diagram/${id}${force ? '?force' : ''}`, {
+            method: 'PUT',
+            body: JSON.stringify(document),
+        }),
 };

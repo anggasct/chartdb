@@ -26,6 +26,7 @@ type Diagram struct {
 	Title     string    `json:"title"`
 	Document  any       `json:"document"`
 	Version   int       `json:"head_version"`
+	Epoch     int       `json:"epoch"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -34,6 +35,7 @@ type Summary struct {
 	ID        uuid.UUID `json:"id"`
 	Title     string    `json:"title"`
 	Version   int       `json:"head_version"`
+	Epoch     int       `json:"epoch"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -91,7 +93,8 @@ func (s *Service) Create(ctx context.Context, owner uuid.UUID, title string, raw
 	}
 	defer tx.Rollback()
 	var createdAt, updatedAt time.Time
-	if err := tx.QueryRowContext(ctx, `INSERT INTO diagram (id, owner_account_id, title, document, head_version) VALUES ($1, $2, $3, $4::jsonb, 1) RETURNING created_at, updated_at`, id, owner, title, string(doc)).Scan(&createdAt, &updatedAt); err != nil {
+	var epoch int
+	if err := tx.QueryRowContext(ctx, `INSERT INTO diagram (id, owner_account_id, title, document, head_version) VALUES ($1, $2, $3, $4::jsonb, 1) RETURNING created_at, updated_at, epoch`, id, owner, title, string(doc)).Scan(&createdAt, &updatedAt, &epoch); err != nil {
 		return Summary{}, apierror.Internal()
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO diagram_version (id, diagram_id, version, document, created_by) VALUES ($1, $2, 1, $3::jsonb, $4)`, uuid.New(), id, string(doc), owner.String()); err != nil {
@@ -100,7 +103,7 @@ func (s *Service) Create(ctx context.Context, owner uuid.UUID, title string, raw
 	if err := tx.Commit(); err != nil {
 		return Summary{}, apierror.Internal()
 	}
-	return Summary{ID: id, Title: title, Version: 1, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
+	return Summary{ID: id, Title: title, Version: 1, Epoch: epoch, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
 }
 
 func (s *Service) Get(ctx context.Context, owner uuid.UUID, id string) (Diagram, error) {
@@ -111,7 +114,7 @@ func (s *Service) Get(ctx context.Context, owner uuid.UUID, id string) (Diagram,
 	var d Diagram
 	var ownerID uuid.UUID
 	var doc string
-	err = s.DB.QueryRowContext(ctx, `SELECT id, owner_account_id, title, document::text, head_version, created_at, updated_at FROM diagram WHERE id = $1`, diagramID).Scan(&d.ID, &ownerID, &d.Title, &doc, &d.Version, &d.CreatedAt, &d.UpdatedAt)
+	err = s.DB.QueryRowContext(ctx, `SELECT id, owner_account_id, title, document::text, head_version, epoch, created_at, updated_at FROM diagram WHERE id = $1`, diagramID).Scan(&d.ID, &ownerID, &d.Title, &doc, &d.Version, &d.Epoch, &d.CreatedAt, &d.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return Diagram{}, apierror.NotFound("not_found", "diagram not found")
 	}
@@ -128,6 +131,10 @@ func (s *Service) Get(ctx context.Context, owner uuid.UUID, id string) (Diagram,
 }
 
 func (s *Service) Put(ctx context.Context, owner uuid.UUID, id string, raw []byte) (Summary, error) {
+	return s.PutWithForce(ctx, owner, id, raw, false)
+}
+
+func (s *Service) PutWithForce(ctx context.Context, owner uuid.UUID, id string, raw []byte, force bool) (Summary, error) {
 	diagramID, err := parseID(id)
 	if err != nil {
 		return Summary{}, err
@@ -145,8 +152,9 @@ func (s *Service) Put(ctx context.Context, owner uuid.UUID, id string, raw []byt
 	var title string
 	var current string
 	var head int
+	var epoch int
 	var createdAt time.Time
-	err = tx.QueryRowContext(ctx, `SELECT owner_account_id, title, document::text, head_version, created_at FROM diagram WHERE id = $1 FOR UPDATE`, diagramID).Scan(&ownerID, &title, &current, &head, &createdAt)
+	err = tx.QueryRowContext(ctx, `SELECT owner_account_id, title, document::text, head_version, epoch, created_at FROM diagram WHERE id = $1 FOR UPDATE`, diagramID).Scan(&ownerID, &title, &current, &head, &epoch, &createdAt)
 	if err == sql.ErrNoRows {
 		return Summary{}, apierror.NotFound("not_found", "diagram not found")
 	}
@@ -162,13 +170,13 @@ func (s *Service) Put(ctx context.Context, owner uuid.UUID, id string, raw []byt
 	}
 	var updatedAt time.Time
 	if bytes.Equal(stored, doc) {
-		if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM diagram WHERE id = $1`, diagramID).Scan(&updatedAt); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT updated_at, epoch FROM diagram WHERE id = $1`, diagramID).Scan(&updatedAt, &epoch); err != nil {
 			return Summary{}, apierror.Internal()
 		}
 		if err := tx.Commit(); err != nil {
 			return Summary{}, apierror.Internal()
 		}
-		return Summary{ID: diagramID, Title: title, Version: head, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
+		return Summary{ID: diagramID, Title: title, Version: head, Epoch: epoch, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
 	}
 	var maxVersion int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM diagram_version WHERE diagram_id = $1`, diagramID).Scan(&maxVersion); err != nil {
@@ -178,7 +186,11 @@ func (s *Service) Put(ctx context.Context, owner uuid.UUID, id string, raw []byt
 	if head < 1 {
 		head = 1
 	}
-	if err := tx.QueryRowContext(ctx, `UPDATE diagram SET document = $1::jsonb, head_version = $2, updated_at = now() WHERE id = $3 RETURNING updated_at`, string(doc), head, diagramID).Scan(&updatedAt); err != nil {
+	newEpoch := epoch
+	if force {
+		newEpoch = epoch + 1
+	}
+	if err := tx.QueryRowContext(ctx, `UPDATE diagram SET document = $1::jsonb, head_version = $2, epoch = $3, updated_at = now() WHERE id = $4 RETURNING updated_at`, string(doc), head, newEpoch, diagramID).Scan(&updatedAt); err != nil {
 		return Summary{}, apierror.Internal()
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO diagram_version (id, diagram_id, version, document, created_by) VALUES ($1, $2, $3, $4::jsonb, $5)`, uuid.New(), diagramID, head, string(doc), owner.String()); err != nil {
@@ -187,7 +199,7 @@ func (s *Service) Put(ctx context.Context, owner uuid.UUID, id string, raw []byt
 	if err := tx.Commit(); err != nil {
 		return Summary{}, apierror.Internal()
 	}
-	return Summary{ID: diagramID, Title: title, Version: head, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
+	return Summary{ID: diagramID, Title: title, Version: head, Epoch: newEpoch, CreatedAt: createdAt, UpdatedAt: updatedAt}, nil
 }
 
 func (s *Service) Delete(ctx context.Context, owner uuid.UUID, id string) error {
@@ -229,7 +241,7 @@ func (s *Service) List(ctx context.Context, owner uuid.UUID, limit int, cursor s
 			return nil, "", apierror.BadRequest("invalid_cursor", "cursor is not valid")
 		}
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, title, head_version, created_at, updated_at FROM diagram WHERE owner_account_id = $1 ORDER BY updated_at DESC, id DESC LIMIT $2 OFFSET $3`, owner, limit+1, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, title, head_version, epoch, created_at, updated_at FROM diagram WHERE owner_account_id = $1 ORDER BY updated_at DESC, id DESC LIMIT $2 OFFSET $3`, owner, limit+1, offset)
 	if err != nil {
 		return nil, "", apierror.Internal()
 	}
@@ -237,7 +249,7 @@ func (s *Service) List(ctx context.Context, owner uuid.UUID, limit int, cursor s
 	out := []Summary{}
 	for rows.Next() {
 		var item Summary
-		if err := rows.Scan(&item.ID, &item.Title, &item.Version, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Version, &item.Epoch, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, "", apierror.Internal()
 		}
 		out = append(out, item)
@@ -382,10 +394,12 @@ func (s *Service) Restore(ctx context.Context, owner uuid.UUID, id string, n int
 	var out Summary
 	var title string
 	var createdAt time.Time
-	if err := tx.QueryRowContext(ctx, `UPDATE diagram SET document = $1::jsonb, head_version = $2, updated_at = now() WHERE id = $3 RETURNING id, title, head_version, created_at, updated_at`, doc, next, diagramID).Scan(&out.ID, &title, &out.Version, &createdAt, &out.UpdatedAt); err != nil {
+	var epoch int
+	if err := tx.QueryRowContext(ctx, `UPDATE diagram SET document = $1::jsonb, head_version = $2, updated_at = now() WHERE id = $3 RETURNING id, title, head_version, epoch, created_at, updated_at`, doc, next, diagramID).Scan(&out.ID, &title, &out.Version, &epoch, &createdAt, &out.UpdatedAt); err != nil {
 		return Summary{}, apierror.Internal()
 	}
 	out.Title = title
+	out.Epoch = epoch
 	out.CreatedAt = createdAt
 	if _, err := tx.ExecContext(ctx, `INSERT INTO diagram_version (id, diagram_id, version, document, created_by) VALUES ($1, $2, $3, $4::jsonb, $5)`, uuid.New(), diagramID, next, doc, owner.String()); err != nil {
 		return Summary{}, apierror.Internal()
