@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
+	ygsync "github.com/reearth/ygo/sync"
 )
 
 type Hub struct {
@@ -232,6 +233,12 @@ func (r *Room) Epoch() int {
 	return r.epoch
 }
 
+func (r *Room) handshakeState() (int, []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.epoch, ygsync.EncodeSyncStep1(r.doc)
+}
+
 func (r *Room) Doc() *crdt.Doc {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -239,6 +246,8 @@ func (r *Room) Doc() *crdt.Doc {
 }
 
 func (r *Room) StateHash() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return crdt.EncodeStateAsUpdateV1(r.doc, nil)
 }
 

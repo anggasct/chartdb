@@ -6,7 +6,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
-	ygsync "github.com/reearth/ygo/sync"
 )
 
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, diagramID uuid.UUID, _ uuid.UUID) {
@@ -45,11 +44,9 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, diagramID uuid.UUI
 	}
 	defer room.removePeer(peer)
 
-	room.mu.Lock()
-	epoch := room.epoch
-	room.mu.Unlock()
+	epoch, step1 := room.handshakeState()
 	_ = conn.Write(ctx, websocket.MessageBinary, EncodeControl(ControlEpoch, epoch))
-	_ = conn.Write(ctx, websocket.MessageBinary, EncodeSyncEnvelope(epoch, ygsync.EncodeSyncStep1(room.doc)))
+	_ = conn.Write(ctx, websocket.MessageBinary, EncodeSyncEnvelope(epoch, step1))
 
 	for {
 		_, raw, err := conn.Read(ctx)

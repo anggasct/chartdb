@@ -170,31 +170,28 @@ func (r *Room) applyUpdate(from *Peer, msgEpoch int, inner []byte) ([]byte, erro
 	switch msgType {
 	case ygsync.MsgSyncStep1:
 		r.mu.Lock()
-		doc := r.doc
-		r.mu.Unlock()
-		return ygsync.EncodeSyncStep2(doc, inner)
+		defer r.mu.Unlock()
+		return ygsync.EncodeSyncStep2(r.doc, inner)
 	case ygsync.MsgSyncStep2, ygsync.MsgUpdate:
 		if len(payload) == 0 {
 			return nil, nil
 		}
 		r.mu.Lock()
 		if msgEpoch != r.epoch {
-			cur := r.epoch
 			r.mu.Unlock()
-			_ = cur
 			return nil, errStaleEpoch
 		}
-		doc := r.doc
-		if err := crdt.ApplyUpdateV1(doc, payload, from.id); err != nil {
+		if err := crdt.ApplyUpdateV1(r.doc, payload, from.id); err != nil {
 			r.mu.Unlock()
 			return nil, err
 		}
+		r.mu.Unlock()
 		var seq int64
 		err = r.hub.DB.QueryRowContext(context.Background(), `INSERT INTO sync_update (diagram_id, update) VALUES ($1, $2) RETURNING seq`, r.diagramID, payload).Scan(&seq)
 		if err != nil {
-			r.mu.Unlock()
 			return nil, err
 		}
+		r.mu.Lock()
 		if seq > r.lastSeq {
 			r.lastSeq = seq
 		}
@@ -223,8 +220,8 @@ func (r *Room) snapshotIfDirty(ctx context.Context) error {
 }
 
 func (r *Room) snapshotLocked(ctx context.Context) error {
-	state := crdt.EncodeStateAsUpdateV1(r.doc, nil)
 	r.mu.Lock()
+	state := crdt.EncodeStateAsUpdateV1(r.doc, nil)
 	at := r.lastSeq
 	r.mu.Unlock()
 	_, err := r.hub.DB.ExecContext(ctx, `INSERT INTO sync_snapshot (diagram_id, update, at_seq) VALUES ($1, $2, $3) ON CONFLICT (diagram_id) DO UPDATE SET update = EXCLUDED.update, at_seq = EXCLUDED.at_seq, created_at = now()`, r.diagramID, state, at)
@@ -232,7 +229,9 @@ func (r *Room) snapshotLocked(ctx context.Context) error {
 		return err
 	}
 	r.mu.Lock()
-	r.sinceSnap = 0
+	if r.lastSeq == at {
+		r.sinceSnap = 0
+	}
 	r.mu.Unlock()
 	return nil
 }

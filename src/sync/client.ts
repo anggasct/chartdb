@@ -48,6 +48,7 @@ export class DiagramSyncClient {
     private closed = false;
     private awareness: awarenessProtocol.Awareness;
     private opts: SyncClientOptions;
+    private readonly remoteOrigin = Symbol('remote-sync');
 
     constructor(
         private diagramId: string,
@@ -78,7 +79,10 @@ export class DiagramSyncClient {
             });
             opts.onPeers?.(peers);
         });
-        this.doc.on('update', (update: Uint8Array) => {
+        this.doc.on('update', (update: Uint8Array, origin: unknown) => {
+            if (origin === this.remoteOrigin) {
+                return;
+            }
             if (this.ws?.readyState === WebSocket.OPEN) {
                 const enc = encoding.createEncoder();
                 syncProtocol.writeUpdate(enc, update);
@@ -134,7 +138,12 @@ export class DiagramSyncClient {
                 }
                 const enc = encoding.createEncoder();
                 const dec = decoding.createDecoder(inner);
-                syncProtocol.readSyncMessage(dec, enc, this.doc, null);
+                syncProtocol.readSyncMessage(
+                    dec,
+                    enc,
+                    this.doc,
+                    this.remoteOrigin
+                );
                 if (encoding.length(enc) > 1) {
                     ws.send(
                         encodeSyncEnvelope(
