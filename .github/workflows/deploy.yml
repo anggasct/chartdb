@@ -1,4 +1,9 @@
-name: Deploy staging
+name: Build and push staging image
+
+# Builds and pushes the :staging image only; it does not roll out,
+# migrate, or health-check any environment. The image relies on
+# in-memory sync state and must run as a single replica wherever it
+# is deployed.
 
 on:
   push:

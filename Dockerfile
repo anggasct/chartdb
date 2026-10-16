@@ -38,4 +38,4 @@ ENV CHARTDB_STATIC_DIR=/app/web PORT=8080
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "export CHARTDB_ADDR=\":${PORT:-8080}\"; exec ./chartdb-server"]
+CMD ["./chartdb-server"]
