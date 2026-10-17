@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/anggasct/chartdb/migrations"
@@ -39,6 +41,15 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
+	conn, err := s.DB.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(83947219321)`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(83947219321)`)
 	if _, err := s.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migration (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return err
 	}
@@ -108,6 +119,12 @@ func EnsureDatabase(ctx context.Context, databaseURL string) error {
 		return nil
 	}
 	quoted := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-	_, err = admin.ExecContext(ctx, `CREATE DATABASE `+quoted)
-	return err
+	if _, err := admin.ExecContext(ctx, `CREATE DATABASE `+quoted); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P04" {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
