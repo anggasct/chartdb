@@ -11,7 +11,11 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,13 +32,58 @@ type Env struct {
 	Server *httptest.Server
 }
 
+func isolatedDatabaseURL(t *testing.T, base string) string {
+	t.Helper()
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	if name == "" {
+		t.Fatalf("test database URL has no database name")
+	}
+	pkg := "t"
+	for i := 1; i < 10; i++ {
+		_, file, _, ok := runtime.Caller(i)
+		if !ok {
+			break
+		}
+		if dir := filepath.Base(filepath.Dir(file)); dir != "testhelper" {
+			pkg = dir
+			break
+		}
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(pkg) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	suffix := strings.Trim(b.String(), "_")
+	if suffix == "" {
+		suffix = "t"
+	}
+	isolated := name + "_" + suffix
+	if len(isolated) > 63 {
+		isolated = isolated[:63]
+	}
+	u.Path = "/" + isolated
+	return u.String()
+}
+
 func Boot(t *testing.T, mutate func(*config.Config)) *Env {
 	t.Helper()
 	databaseURL := os.Getenv("CHARTDB_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("CHARTDB_TEST_DATABASE_URL is not set")
 	}
+	databaseURL = isolatedDatabaseURL(t, databaseURL)
 	ctx := context.Background()
+	if err := store.EnsureDatabase(ctx, databaseURL); err != nil {
+		t.Fatalf("ensure test database: %v", err)
+	}
 	st, err := store.Open(ctx, databaseURL)
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
