@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -81,8 +82,18 @@ func Load() Config {
 	publicURL := getenv("CHARTDB_PUBLIC_URL", "http://localhost:8080")
 	oidcIssuer := os.Getenv("CHARTDB_OIDC_ISSUER")
 
+	addr := os.Getenv("CHARTDB_ADDR")
+	if addr == "" {
+		if port := os.Getenv("PORT"); port != "" {
+			port = strings.TrimPrefix(port, ":")
+			addr = ":" + port
+		} else {
+			addr = DefaultAddr
+		}
+	}
+
 	cfg := Config{
-		Addr:              getenv("CHARTDB_ADDR", DefaultAddr),
+		Addr:              addr,
 		DatabaseURL:       os.Getenv("CHARTDB_DATABASE_URL"),
 		PublicURL:         publicURL,
 		AppURL:            getenv("CHARTDB_APP_URL", publicURL),

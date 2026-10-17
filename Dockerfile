@@ -1,12 +1,6 @@
-FROM node:24-alpine AS builder
+FROM node:24-alpine AS web
 
-ARG VITE_OPENAI_API_KEY
-ARG VITE_OPENAI_API_ENDPOINT
-ARG VITE_LLM_MODEL_NAME
-ARG VITE_HIDE_CHARTDB_CLOUD
-ARG VITE_DISABLE_ANALYTICS
-
-WORKDIR /usr/src/app
+WORKDIR /app/web
 
 COPY package.json package-lock.json ./
 
@@ -14,21 +8,34 @@ RUN npm ci
 
 COPY . .
 
-RUN echo "VITE_OPENAI_API_KEY=${VITE_OPENAI_API_KEY}" > .env && \
-    echo "VITE_OPENAI_API_ENDPOINT=${VITE_OPENAI_API_ENDPOINT}" >> .env && \
-    echo "VITE_LLM_MODEL_NAME=${VITE_LLM_MODEL_NAME}" >> .env && \
-    echo "VITE_HIDE_CHARTDB_CLOUD=${VITE_HIDE_CHARTDB_CLOUD}" >> .env && \
-    echo "VITE_DISABLE_ANALYTICS=${VITE_DISABLE_ANALYTICS}" >> .env
-
 RUN npm run build
 
-FROM nginx:stable-alpine AS production
+FROM golang:1.26-alpine AS api
 
-COPY --from=builder /usr/src/app/dist /usr/share/nginx/html
-COPY ./default.conf.template /etc/nginx/conf.d/default.conf.template
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+WORKDIR /app
 
-EXPOSE 80
+COPY go.mod go.sum ./
 
-ENTRYPOINT ["/entrypoint.sh"]
+RUN go mod download
+
+COPY server ./server
+
+COPY migrations ./migrations
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/chartdb-server ./server
+
+FROM alpine:3.20 AS production
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+COPY --from=web /app/web/dist ./web
+
+COPY --from=api /app/chartdb-server ./
+
+ENV CHARTDB_STATIC_DIR=/app/web PORT=8080
+
+EXPOSE 8080
+
+CMD ["./chartdb-server"]
