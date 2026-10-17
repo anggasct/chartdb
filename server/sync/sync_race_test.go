@@ -102,11 +102,19 @@ func TestConcurrentSnapshotHandshakeNoRace(t *testing.T) {
 	received := make(chan []byte, total*2)
 	go func() {
 		for {
-			rctx, rcan := context.WithTimeout(context.Background(), 2*time.Second)
+			rctx, rcan := context.WithTimeout(ctx, 2*time.Second)
 			_, raw, err := lb.Read(rctx)
 			rcan()
 			if err != nil {
-				return
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if websocket.CloseStatus(err) != -1 {
+					return
+				}
+				continue
 			}
 			et, p, err := sync.DecodeEnvelope(raw)
 			if err != nil || et != sync.EnvelopeSync {
@@ -144,11 +152,10 @@ func TestConcurrentSnapshotHandshakeNoRace(t *testing.T) {
 		}
 	}()
 
-	var wg stdsync.WaitGroup
+	var sendWg stdsync.WaitGroup
 	for w := 0; w < writers; w++ {
-		wg.Add(1)
+		sendWg.Add(1)
 		go func(w int) {
-			defer wg.Done()
 			c, stop := dialOwner(t, env, alice, diagramID)
 			defer stop()
 			defer c.CloseNow()
@@ -163,6 +170,19 @@ func TestConcurrentSnapshotHandshakeNoRace(t *testing.T) {
 					epoch = ctrl.Epoch
 				}
 			}
+			go func() {
+				for {
+					rctx, rcan := context.WithTimeout(context.Background(), 2*time.Second)
+					_, _, err := c.Read(rctx)
+					rcan()
+					if err != nil {
+						if websocket.CloseStatus(err) != -1 {
+							return
+						}
+						continue
+					}
+				}
+			}()
 			for j := 0; j < perWriter; j++ {
 				single := crdt.New()
 				key := uuid.NewString()[:8]
@@ -175,6 +195,9 @@ func TestConcurrentSnapshotHandshakeNoRace(t *testing.T) {
 				wcan()
 				time.Sleep(time.Millisecond)
 			}
+			sendWg.Done()
+			<-ctx.Done()
+			_ = c.Close(websocket.StatusNormalClosure, "")
 		}(w)
 	}
 
@@ -189,7 +212,7 @@ func TestConcurrentSnapshotHandshakeNoRace(t *testing.T) {
 		hstop()
 	}
 
-	wg.Wait()
+	sendWg.Wait()
 	close(stopReaders)
 	readerWg.Wait()
 
